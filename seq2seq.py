@@ -2,6 +2,7 @@ import tensorflow as tf
 import tensorflow.contrib.rnn as rnn
 import numpy as np
 import tensorflow.contrib.seq2seq as seq2seq
+from maxinum_matching import Separator
 from sklearn.model_selection import train_test_split
 from DataBatch import DataBatch
 
@@ -14,8 +15,14 @@ class seq2seqModel(object):
         self.word2index, self.index2word = self._read_dict()
         self.graph, self.loss, self.train_op, self.predict_output = self._model()
         self.sess = tf.Session(graph=self.graph)
+        self.separator = None
         with self.graph.as_default():
             self.sess.run(tf.global_variables_initializer())
+            try:
+                saver = tf.train.Saver()
+                saver.restore(self.sess, './model_save/seq2seq')
+            except ValueError:
+                print('fail to read model.')
             embedding_saver = tf.train.Saver({'embeddings': self.graph.get_tensor_by_name('embedding:0')})
             embedding_saver.restore(self.sess, './word_embedding/embed')
 
@@ -28,7 +35,7 @@ class seq2seqModel(object):
             for line in f:
                 w, i = line.split()
                 word2index[w] = int(i)
-                index2word[i] = w
+                index2word[int(i)] = w
         return word2index, index2word
 
     def _read_data(self):
@@ -89,16 +96,16 @@ class seq2seqModel(object):
                 training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
                 training_decoder = seq2seq.BasicDecoder(decoder_cell, training_helper, encoder_state, output_layer)
                 # impute_finish 标记为True时，序列读入<eos>后不再进行计算，保持state不变并且输出全0
-                training_output, _, _ = seq2seq.dynamic_decode(training_decoder, impute_finished=True,
-                                                               maximum_iterations=40)
+                training_output, _, _ = seq2seq.dynamic_decode(training_decoder, maximum_iterations=40,
+                                                               impute_finished=True)
             # predict decoder
             with tf.variable_scope('decoder', reuse=True):
                 start_token = tf.tile(tf.constant([self.word2index['GO']], dtype=tf.int32), [batch_size], name='start_token')
                 predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, start_token,
                                                                self.word2index['EOS'])
                 predict_decoder = seq2seq.BasicDecoder(decoder_cell, predict_helper, encoder_state, output_layer)
-                predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder, impute_finished=True,
-                                                              maximum_iterations=40)
+                predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder, maximum_iterations=40,
+                                                              impute_finished=True)
 
             # loss function
             training_logits = tf.identity(training_output.rnn_output, name='logits')
@@ -115,7 +122,7 @@ class seq2seqModel(object):
 
         return graph, loss, train_op, predicting_logits
 
-    def test(self, data):
+    def test_data(self, data):
         batch_size = 64
         batch_num = 10
         g = self.graph
@@ -157,9 +164,10 @@ class seq2seqModel(object):
                         print("training epoch {0}/{1}, batch {2}/{3}, loss={4}"
                               .format(epoch + 1, max_epoch, i + 1, tr_batch_num, loss_var))
                     if (i + 1) % 100 == 0:
-                        loss_var = self.test(valid_data)
+                        loss_var = self.test_data(valid_data)
                         print("valid result: loss={0}".format(loss_var))
-            loss_var = self.test(test_data)
+                        self.save_model()
+            loss_var = self.test_data(test_data)
             print('train finished, test tesult: loss={0}'.format(loss_var))
 
     def save_model(self):
@@ -167,8 +175,34 @@ class seq2seqModel(object):
             saver = tf.train.Saver()
             saver.save(self.sess, './model_save/seq2seq')
 
+    def test(self, sentence):
+        if self.separator is None:
+            self.separator = Separator()
+        question = self.separator.separate(sentence)  # 分词
+        question = [['GO'] + question + ['EOS']]
+        question = np.array(question)
+        question = np.vectorize(lambda x: self.word2index.get(x, self.word2index['UNK']))(question)
+        with self.sess.as_default():
+            g = self.graph
+            answer, *_ = self.sess.run([self.predict_output], feed_dict={
+                g.get_tensor_by_name('x_input:0'): question,
+                g.get_tensor_by_name('x_length:0'): [len(question[0])],
+                g.get_tensor_by_name('batch_size:0'): 1
+            })
+            answer = answer[0]  # 去掉batch层
+            answer = np.argmax(answer, 1)  # 按行取最大值
+            answer = np.vectorize(lambda x: self.index2word[x])(answer)
+        print(answer)
+
 
 if __name__ == '__main__':
     a = seq2seqModel()
     a.train()
-    a.save_model()
+    a.test('你好')
+    while True:
+        i = input()
+        if i == '':
+            break
+        a.test(i)
+    # a.train()
+    # a.save_model()
