@@ -6,3 +6,5 @@ dict.txt
 seq2seq.7z
 train_data.txt
 word_dictionary.txt
+*.db
+lstm/
