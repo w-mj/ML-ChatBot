@@ -8,11 +8,13 @@ from sklearn.model_selection import train_test_split
 from DataBatch import DataBatch
 from DataBatch_db import DataBatch_db
 
+
 class seq2seqModel(object):
     def __init__(self):
         self.embedding_size = 128
         self.num_words = 85000
         self.sentence_length = 32
+        self.max_sentence_length = 50
         self.word2index, self.index2word = self._read_dict()
         self.graph, self.loss, self.train_op, self.predict_output = self._model()
         self.sess = tf.Session(graph=self.graph)
@@ -22,7 +24,7 @@ class seq2seqModel(object):
             self.sess.run(tf.global_variables_initializer())
             try:
                 saver = tf.train.Saver()
-                # saver.restore(self.sess, './model_save/seq2seq')
+                saver.restore(self.sess, './model_save/seq2seq')
             except (ValueError, tf.errors.NotFoundError):
                 print('fail to read model.')
             embedding_saver = tf.train.Saver({'embeddings': self.graph.get_tensor_by_name('embedding:0')})
@@ -55,18 +57,19 @@ class seq2seqModel(object):
 
     def _read_data_db(self):
         self.db = db = sqlite3.connect('data_separated.db')
-        size = db.execute('select count (*) as num from conversation').fetchall()[0][0]
+        size = db.execute('SELECT count (*) AS num FROM conversation').fetchall()[0][0]
         print('open database, {} items altogether'.format(size))
         ids = np.random.random_integers(0, size, [size])
         return DataBatch_db(db, ids[0: int(size * 0.6)]), \
-               DataBatch_db(db, ids[int(size * 0.6): int(size * 0.8)]),\
+               DataBatch_db(db, ids[int(size * 0.6): int(size * 0.8)]), \
                DataBatch_db(db, ids[int(size * 0.8):]),
-
-
 
     def _preprocess_data(self, batch_x, batch_y):
         batch_x = list(map(str.split, batch_x))  # 把空格分隔的词转换成列表
         batch_y = list(map(str.split, batch_y))
+        max_length = self.max_sentence_length
+        batch_x = list(map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_x))
+        batch_y = list(map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_y))
         batch_x = list(map(lambda x: ['GO'] + x + ['EOS'], batch_x))  # 在每句话前后添加开始和结束符
         batch_y = list(map(lambda x: ['GO'] + x + ['EOS'], batch_y))
         length_x = list(map(len, batch_x))  # 获得每句话的长度
@@ -110,14 +113,17 @@ class seq2seqModel(object):
             training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
             training_decoder = seq2seq.BasicDecoder(decoder_cell, training_helper, encoder_state, output_layer)
             # impute_finish 标记为True时，序列读入<eos>后不再进行计算，保持state不变并且输出全0
-            training_output, _, _ = seq2seq.dynamic_decode(training_decoder, maximum_iterations=40,
+            training_output, _, _ = seq2seq.dynamic_decode(training_decoder,
+                                                           # 加上<GO>和<EOS>
+                                                           maximum_iterations=self.max_sentence_length + 2,
                                                            impute_finished=True)
 
             # predict decoder
             predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.word2index['GO']),
                                                            self.word2index['EOS'])
             predict_decoder = seq2seq.BasicDecoder(decoder_cell, predict_helper, encoder_state, output_layer)
-            predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder, maximum_iterations=40,
+            predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder,
+                                                          maximum_iterations=self.max_sentence_length + 2,
                                                           impute_finished=True)
 
             # loss function
@@ -150,17 +156,17 @@ class seq2seqModel(object):
                              g.get_tensor_by_name('x_length:0'): length_x,
                              g.get_tensor_by_name('y_input:0'): batch_y,
                              g.get_tensor_by_name('y_length:0'): length_y,
-                             g.get_tensor_by_name('batch_size:0'): batch_size
+                             g.get_tensor_by_name('batch_size:0'): len(batch_x)
                              }
                 loss, output, predict_output = self.sess.run([self.loss, g.get_tensor_by_name('training_logits:0'),
-                                                             self.predict_output], feed_dict)
+                                                              self.predict_output], feed_dict)
                 if not printed:
                     output = np.argmax(output[0], 1)  # 按行取最大值
                     output = np.vectorize(lambda s: self.index2word[s])(output)
                     predict_output = np.argmax(predict_output[0], 1)  # 按行取最大值
                     predict_output = np.vectorize(lambda s: self.index2word[s])(predict_output)
                     print('input: {0}\ntarget-output: {1}\ntrain-output: {2}\npredict-output: {3}'.
-                          format(x[0],  y[0], ''.join(output), ''.join(predict_output)))
+                          format(x[0], y[0], ''.join(output), ''.join(predict_output)))
                     printed = True
 
                 aver_loss += loss
@@ -179,14 +185,18 @@ class seq2seqModel(object):
                     x, y = train_data.next_batch(batch_size)
                     assert len(x) == len(y)
                     batch_x, length_x, batch_y, length_y = self._preprocess_data(x, y)
+
                     feed_dict = {g.get_tensor_by_name('x_input:0'): batch_x,
                                  g.get_tensor_by_name('x_length:0'): length_x,
                                  g.get_tensor_by_name('y_input:0'): batch_y,
                                  g.get_tensor_by_name('y_length:0'): length_y,
                                  g.get_tensor_by_name('learning_rate:0'): _lr,
-                                 g.get_tensor_by_name('batch_size:0'): batch_size
+                                 g.get_tensor_by_name('batch_size:0'): len(length_x)
                                  }
-                    loss_var, *_ = self.sess.run([self.loss, self.train_op], feed_dict)
+                    try:
+                        loss_var, *_ = self.sess.run([self.loss, self.train_op], feed_dict)
+                    except tf.errors.InvalidArgumentError as e:
+                        print(e)
                     if (i + 1) % 10 == 0:
                         print("training epoch {0}/{1}, batch {2}/{3}, loss={4}"
                               .format(epoch + 1, max_epoch, i + 1, tr_batch_num, loss_var))
@@ -231,4 +241,4 @@ if __name__ == '__main__':
     # a.test('人们提起网文都会说，第一部网络小说是痞子蔡的《第一次的亲密接触》。')
     # a.test('最后怎么解决的？')
     # a.train()
-    # a.save_model()
+    a.save_model()

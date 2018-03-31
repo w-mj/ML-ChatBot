@@ -4,6 +4,7 @@
 '''
 
 import numpy as np
+import logging
 
 
 class DataBatch_db(object):
@@ -26,18 +27,21 @@ class DataBatch_db(object):
     def next_batch(self, batch_size):
         index = self._index
         size = self._size
-        if index + batch_size < size:
+        if index + batch_size <= size:
             query = tuple(self._ids[index: index + batch_size])
             self._index += batch_size
         else:
-            query = tuple(self._ids[index:])
-            self._index = 0
+            query = tuple(self._ids[index:] + self._ids[0: index + batch_size - size])
+            self._index = index + batch_size - size
             if self._shuffle:
                 index = np.random.permutation(self._size)
                 self._ids = self._ids[index]
 
         value = self._cursor.execute('SELECT * from conversation where rowid in %s' % str(query)).fetchall()
         value = np.asarray(value)
+        if len(value) != batch_size:
+            logging.warning('number of result is less than expect while query the database with key={}'.format(str(query)))
+        # TODO: 偶尔会出现查询数据库的返回个数比query少1的情况
         return value[:, 0].tolist(), value[:, 1].tolist()
 
 
