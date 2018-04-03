@@ -41,7 +41,6 @@ class DataBatch_db(object):
         value = np.asarray(value)
         if len(value) != batch_size:
             logging.warning('number of result is less than expect while query the database with key={}'.format(str(query)))
-        # TODO: 偶尔会出现查询数据库的返回个数比query少1的情况
         return value[:, 0].tolist(), value[:, 1].tolist()
 
 

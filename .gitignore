@@ -8,3 +8,4 @@ train_data.txt
 word_dictionary.txt
 *.db
 lstm/
+env/

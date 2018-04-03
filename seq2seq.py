@@ -59,10 +59,10 @@ class seq2seqModel(object):
         self.db = db = sqlite3.connect('data_separated.db')
         size = db.execute('SELECT count (*) AS num FROM conversation').fetchall()[0][0]
         print('open database, {} items altogether'.format(size))
-        ids = np.random.random_integers(0, size, [size])
+        ids = np.random.permutation(size)
         return DataBatch_db(db, ids[0: int(size * 0.6)]), \
                DataBatch_db(db, ids[int(size * 0.6): int(size * 0.8)]), \
-               DataBatch_db(db, ids[int(size * 0.8):]),
+               DataBatch_db(db, ids[int(size * 0.8):])
 
     def _preprocess_data(self, batch_x, batch_y):
         batch_x = list(map(str.split, batch_x))  # 把空格分隔的词转换成列表
@@ -179,7 +179,7 @@ class seq2seqModel(object):
                 aver_loss += loss
         return aver_loss / batch_num
 
-    def train(self, batch_size=32, _lr=0.002, max_epoch=1):
+    def train(self, batch_size=64, _lr=0.001, max_epoch=1):
         train_data, valid_data, test_data = self._read_data_db()
         self.test_data(valid_data)
 
