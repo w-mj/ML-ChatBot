@@ -25,7 +25,7 @@ class seq2seqModel(object):
             try:
                 saver = tf.train.Saver()
                 saver.restore(self.sess, './model_save/seq2seq')
-            except (ValueError, tf.errors.NotFoundError):
+            except Exception:
                 print('fail to read model.')
             embedding_saver = tf.train.Saver({'embeddings': self.graph.get_tensor_by_name('embedding:0')})
             embedding_saver.restore(self.sess, './word_embedding/embed')
@@ -107,9 +107,9 @@ class seq2seqModel(object):
                                                       initial_state=encoder_cell.zero_state(batch_size, tf.float32),
                                                       sequence_length=x_sequence_length)
 
-            attention_mechanism = seq2seq.BahdanauAttention(128, output, x_sequence_length)
+            attention_mechanism = seq2seq.BahdanauAttention(64, output, x_sequence_length)
             attention_cell = seq2seq.AttentionWrapper(decoder_cell, attention_mechanism)
-            decoder_cell = rnn.OutputProjectionWrapper(attention_cell, 128, activation=tf.tanh)
+            decoder_cell = rnn.OutputProjectionWrapper(attention_cell, 64, activation=tf.tanh)
             encoder_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
 
             output_layer = tf.layers.Dense(self.num_words,
@@ -179,7 +179,7 @@ class seq2seqModel(object):
                 aver_loss += loss
         return aver_loss / batch_num
 
-    def train(self, batch_size=64, _lr=0.001, max_epoch=1):
+    def train(self, batch_size=32, _lr=0.001, max_epoch=1):
         train_data, valid_data, test_data = self._read_data_db()
         self.test_data(valid_data)
 
@@ -243,7 +243,11 @@ class seq2seqModel(object):
 
 if __name__ == '__main__':
     a = seq2seqModel()
-    a.train()
+    while True:
+        try:
+            a.train()
+        except tf.errors.ResourceExhaustedError:
+            pass
     # a.test('战狼56亿票房，旷世神作，中国第一')
     # a.test('人们提起网文都会说，第一部网络小说是痞子蔡的《第一次的亲密接触》。')
     # a.test('最后怎么解决的？')
