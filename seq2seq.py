@@ -1,3 +1,4 @@
+import io
 import tensorflow as tf
 import tensorflow.contrib.rnn as rnn
 import numpy as np
@@ -11,12 +12,13 @@ from DataBatch_db import DataBatch_db
 
 class seq2seqModel(object):
     def __init__(self):
-        self.embedding_size = 128
+        self.embedding_size = 300
         self.num_words = 85000
         self.sentence_length = 32
         self.max_sentence_length = 50
-        self.word2index, self.index2word = self._read_dict()
-        self.graph, self.loss, self.train_op, self.predict_output = self._model()
+        self.hidden_size = 128
+        self.word2index, self.index2word, embed, self.num_words, self.embedding_size = self._read_embedding()
+        self.graph, self.loss, self.train_op, self.predict_output = self._model(embed)
         self.sess = tf.Session(graph=self.graph)
         self.separator = None
         self.db = None
@@ -25,10 +27,25 @@ class seq2seqModel(object):
             try:
                 saver = tf.train.Saver()
                 saver.restore(self.sess, './model_save/seq2seq')
+                print('load model.')
             except Exception:
                 print('fail to read model.')
-            embedding_saver = tf.train.Saver({'embeddings': self.graph.get_tensor_by_name('embedding:0')})
-            embedding_saver.restore(self.sess, './word_embedding/embed')
+            # embedding_saver = tf.train.Saver({'embeddings': self.graph.get_tensor_by_name('embedding:0')})
+            # embedding_saver.restore(self.sess, './word_embedding/embed')
+
+    def _read_embedding(self):
+        fin = io.open('word_embed_clean.vec', 'r', encoding='utf-8', newline='\n', errors='ignore')
+        n, d = map(int, fin.readline().split())
+        data = []
+        word2index = {}
+        index2word = {}
+        for i, line in enumerate(fin):
+            tokens = line.rstrip().split(' ')
+            data.append(list(map(float, tokens[1:])))
+            assert len(data[-1]) == d
+            word2index[tokens[0]] = i
+            index2word[i] = tokens[0]
+        return word2index, index2word, np.asarray(data, dtype=np.float32), n, d
 
     @staticmethod
     def _read_dict():
@@ -65,11 +82,11 @@ class seq2seqModel(object):
                DataBatch_db(db, ids[int(size * 0.8):])
 
     def _preprocess_data(self, batch_x, batch_y):
-        batch_x = list(map(str.split, batch_x))  # 把空格分隔的词转换成列表
-        batch_y = list(map(str.split, batch_y))
+        batch_x = map(str.split, batch_x)  # 把空格分隔的词转换成列表
+        batch_y = map(str.split, batch_y)
         max_length = self.max_sentence_length
-        batch_x = list(map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_x))
-        batch_y = list(map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_y))
+        batch_x = map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_x)
+        batch_y = map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_y)
         batch_x = list(map(lambda x: ['GO'] + x + ['EOS'], batch_x))  # 在每句话前后添加开始和结束符
         batch_y = list(map(lambda x: ['GO'] + x + ['EOS'], batch_y))
         length_x = list(map(len, batch_x))  # 获得每句话的长度
@@ -84,11 +101,54 @@ class seq2seqModel(object):
         batch_y = np.vectorize(lambda x: self.word2index.get(x, self.word2index['UNK']))(batch_y)
         return batch_x, length_x, batch_y, length_y
 
-    def _model(self):
+    def _cell(self, keep_prob):
+        cell = rnn.LSTMCell(num_units=self.hidden_size, reuse=tf.get_variable_scope().reuse,
+                            initializer=tf.truncated_normal_initializer(-0.1, 0.1, seed=2))
+        return rnn.DropoutWrapper(cell, output_keep_prob=keep_prob)
+
+    def _encoder(self, keep_prob, x_embedding, x_sequence_length, batch_size):
+        cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(4)])
+        # 计算encoder
+        output, state = tf.nn.dynamic_rnn(cell=cell, inputs=x_embedding,
+                                          initial_state=cell.zero_state(batch_size, tf.float32),
+                                          sequence_length=x_sequence_length)
+        return output, state
+
+    def _decoder(self, keep_prob, encoder_output, encoder_state, x_sequence_length, batch_size,
+                 y_embedding, y_sequence_length, embedding):
+        decoder_cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(4)])
+        attention_mechanism = seq2seq.BahdanauAttention(self.hidden_size, encoder_output, x_sequence_length)  # attention
+        attention_cell = seq2seq.AttentionWrapper(decoder_cell, attention_mechanism, initial_cell_state=encoder_state)
+        decoder_cell = rnn.OutputProjectionWrapper(attention_cell, self.hidden_size, reuse=tf.AUTO_REUSE)
+        encoder_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
+
+        output_layer = tf.layers.Dense(self.num_words,
+                                       kernel_initializer=tf.truncated_normal_initializer(mean=0.0, stddev=0.1))
+
+        with tf.variable_scope('train'):
+            # 定义training decoder
+            training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
+            training_decoder = seq2seq.BasicDecoder(decoder_cell, training_helper, encoder_state, output_layer)
+            # impute_finish 标记为True时，序列读入<eos>后不再进行计算，保持state不变并且输出全0
+            training_output, _, _ = seq2seq.dynamic_decode(training_decoder,
+                                                           # 加上<GO>和<EOS>
+                                                           maximum_iterations=self.max_sentence_length + 2,
+                                                           impute_finished=True)
+        with tf.variable_scope('predict', reuse=True):
+            # predict decoder
+            predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.word2index['GO']),
+                                                           self.word2index['EOS'])
+            predict_decoder = seq2seq.BasicDecoder(decoder_cell, predict_helper, encoder_state, output_layer)
+            predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder,
+                                                          maximum_iterations=self.max_sentence_length + 2,
+                                                          impute_finished=True)
+
+        return training_output, predict_output
+
+    def _model(self, embed):
         graph = tf.Graph()
         with graph.as_default():
-            embedding = tf.Variable(np.zeros(shape=[self.num_words, self.embedding_size], dtype=np.float32),
-                                    trainable=False, name='embedding')  # 词向量
+            embedding = tf.Variable(embed, trainable=False, name='embedding')  # 词向量
             lr = tf.placeholder(tf.float32, [], name='learning_rate')
             # 输入数据
             x_input = tf.placeholder(tf.int32, [None, None], name='x_input')  # 输入数据X
@@ -98,43 +158,15 @@ class seq2seqModel(object):
             y_sequence_length = tf.placeholder(tf.int32, [None], name='y_length')  # 每一个Y的长度
             y_embedding = tf.nn.embedding_lookup(embedding, y_input)  # 对Y向量化
             batch_size = tf.placeholder(tf.int32, [], name='batch_size')
-            # batch_size = tf.shape(x_input)[0]
-            # 使用gru代替LSTM, 4层cell堆叠
-            encoder_cell = rnn.MultiRNNCell([rnn.GRUCell(128, activation=tf.tanh) for _ in range(4)])
-            decoder_cell = rnn.MultiRNNCell([rnn.GRUCell(128, activation=tf.tanh) for _ in range(4)])
-            # 计算encoder
-            output, encoder_state = tf.nn.dynamic_rnn(cell=encoder_cell, inputs=x_embedding,
-                                                      initial_state=encoder_cell.zero_state(batch_size, tf.float32),
-                                                      sequence_length=x_sequence_length)
+            keep_prob = tf.placeholder(tf.float32, [], name='keep_prob')
 
-            attention_mechanism = seq2seq.BahdanauAttention(64, output, x_sequence_length)
-            attention_cell = seq2seq.AttentionWrapper(decoder_cell, attention_mechanism)
-            decoder_cell = rnn.OutputProjectionWrapper(attention_cell, 64, activation=tf.tanh)
-            encoder_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
+            encoder_output, encoder_state = self._encoder(keep_prob, x_embedding, x_sequence_length, batch_size)
 
-            output_layer = tf.layers.Dense(self.num_words,
-                                           kernel_initializer=tf.truncated_normal_initializer(mean=0.0, stddev=0.1))
-
-            with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
-                # 定义training decoder
-                training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
-                training_decoder = seq2seq.BasicDecoder(decoder_cell, training_helper, encoder_state, output_layer)
-                # impute_finish 标记为True时，序列读入<eos>后不再进行计算，保持state不变并且输出全0
-                training_output, _, _ = seq2seq.dynamic_decode(training_decoder,
-                                                               # 加上<GO>和<EOS>
-                                                               maximum_iterations=self.max_sentence_length + 2,
-                                                               impute_finished=True)
-
-                # predict decoder
-                predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.word2index['GO']),
-                                                               self.word2index['EOS'])
-                predict_decoder = seq2seq.BasicDecoder(decoder_cell, predict_helper, encoder_state, output_layer)
-                predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder,
-                                                              maximum_iterations=self.max_sentence_length + 2,
-                                                              impute_finished=True)
+            train_output, predict_output = self._decoder(keep_prob, encoder_output, encoder_state, x_sequence_length,
+                                                         batch_size, y_embedding, y_sequence_length, embedding)
 
             # loss function
-            training_logits = tf.identity(training_output.rnn_output, name='training_logits')
+            training_logits = tf.identity(train_output.rnn_output, name='training_logits')
             predicting_logits = tf.identity(predict_output.rnn_output, name='predicting')
 
             masks = tf.sequence_mask(y_sequence_length, dtype=tf.float32, name='mask')
@@ -163,7 +195,8 @@ class seq2seqModel(object):
                              g.get_tensor_by_name('x_length:0'): length_x,
                              g.get_tensor_by_name('y_input:0'): batch_y,
                              g.get_tensor_by_name('y_length:0'): length_y,
-                             g.get_tensor_by_name('batch_size:0'): len(batch_x)
+                             g.get_tensor_by_name('batch_size:0'): len(batch_x),
+                             g.get_tensor_by_name('keep_prob:0'): 1
                              }
                 loss, output, predict_output = self.sess.run([self.loss, g.get_tensor_by_name('training_logits:0'),
                                                               self.predict_output], feed_dict)
@@ -179,7 +212,7 @@ class seq2seqModel(object):
                 aver_loss += loss
         return aver_loss / batch_num
 
-    def train(self, batch_size=32, _lr=0.001, max_epoch=1):
+    def train(self, batch_size=64, _lr=0.002, max_epoch=1):
         train_data, valid_data, test_data = self._read_data_db()
         self.test_data(valid_data)
 
@@ -198,7 +231,8 @@ class seq2seqModel(object):
                                  g.get_tensor_by_name('y_input:0'): batch_y,
                                  g.get_tensor_by_name('y_length:0'): length_y,
                                  g.get_tensor_by_name('learning_rate:0'): _lr,
-                                 g.get_tensor_by_name('batch_size:0'): len(length_x)
+                                 g.get_tensor_by_name('batch_size:0'): len(length_x),
+                                 g.get_tensor_by_name('keep_prob:0'): 0.9
                                  }
                     try:
                         loss_var, *_ = self.sess.run([self.loss, self.train_op], feed_dict)

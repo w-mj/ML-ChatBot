@@ -9,3 +9,7 @@ word_dictionary.txt
 *.db
 lstm/
 env/
+cc.zh.300.vec
+common_words.txt
+word_embed_clean.vec
+wiki.zh.vec
