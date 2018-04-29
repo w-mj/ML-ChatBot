@@ -17,6 +17,7 @@ class seq2seqModel(object):
         self.sentence_length = 32
         self.max_sentence_length = 50
         self.hidden_size = 128
+        self.lstm_dims = 10
         self.word2index, self.index2word, embed, self.num_words, self.embedding_size = self._read_embedding()
         self.graph, self.loss, self.train_op, self.predict_output = self._model(embed)
         self.sess = tf.Session(graph=self.graph)
@@ -40,7 +41,7 @@ class seq2seqModel(object):
         word2index = {}
         index2word = {}
         for i, line in enumerate(fin):
-            tokens = line.rstrip().split(' ')
+            tokens = line.strip().split()
             data.append(list(map(float, tokens[1:])))
             assert len(data[-1]) == d
             word2index[tokens[0]] = i
@@ -87,8 +88,9 @@ class seq2seqModel(object):
         max_length = self.max_sentence_length
         batch_x = map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_x)
         batch_y = map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_y)
-        batch_x = list(map(lambda x: ['GO'] + x + ['EOS'], batch_x))  # 在每句话前后添加开始和结束符
-        batch_y = list(map(lambda x: ['GO'] + x + ['EOS'], batch_y))
+        # batch_x = list(map(lambda x: ['GO'] + x + ['EOS'], batch_x))  # 在每句话前后添加开始和结束符
+        batch_x = list(map(lambda x: x + ['EOS'], batch_x))
+        batch_y = list(map(lambda x: x + ['EOS'], batch_y))
         length_x = list(map(len, batch_x))  # 获得每句话的长度
         length_y = list(map(len, batch_y))
         max_lx = max(length_x)  # 最大长度
@@ -102,48 +104,51 @@ class seq2seqModel(object):
         return batch_x, length_x, batch_y, length_y
 
     def _cell(self, keep_prob):
-        cell = rnn.LSTMCell(num_units=self.hidden_size, reuse=tf.get_variable_scope().reuse,
-                            initializer=tf.truncated_normal_initializer(-0.1, 0.1, seed=2))
+        cell = rnn.LSTMCell(num_units=self.hidden_size)
         return rnn.DropoutWrapper(cell, output_keep_prob=keep_prob)
 
     def _encoder(self, keep_prob, x_embedding, x_sequence_length, batch_size):
-        cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(4)])
+        cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(self.lstm_dims)])
         # 计算encoder
         output, state = tf.nn.dynamic_rnn(cell=cell, inputs=x_embedding,
                                           initial_state=cell.zero_state(batch_size, tf.float32),
                                           sequence_length=x_sequence_length)
         return output, state
 
-    def _decoder(self, keep_prob, encoder_output, encoder_state, x_sequence_length, batch_size,
-                 y_embedding, y_sequence_length, embedding):
-        decoder_cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(4)])
-        attention_mechanism = seq2seq.BahdanauAttention(self.hidden_size, encoder_output, x_sequence_length)  # attention
-        attention_cell = seq2seq.AttentionWrapper(decoder_cell, attention_mechanism, initial_cell_state=encoder_state)
-        decoder_cell = rnn.OutputProjectionWrapper(attention_cell, self.hidden_size, reuse=tf.AUTO_REUSE)
-        encoder_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
+    def _decoder(self, keep_prob, encoder_output, encoder_state, batch_size, scope, helper, reuse=None):
+        with tf.variable_scope(scope, reuse=reuse):
+            attention_states = encoder_output
+            cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(self.lstm_dims)])
+            attention_mechanism = seq2seq.BahdanauAttention(self.hidden_size, attention_states)  # attention
+            decoder_cell = seq2seq.AttentionWrapper(cell, attention_mechanism, attention_layer_size=self.hidden_size // 2)
+            decoder_cell = rnn.OutputProjectionWrapper(decoder_cell, self.hidden_size, reuse=reuse, activation=tf.nn.leaky_relu)
+            encoder_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
+            output_layer = tf.layers.Dense(self.num_words,
+                                           kernel_initializer=tf.contrib.layers.xavier_initializer(),
+                                           activation=tf.nn.leaky_relu)
+            decoder = seq2seq.BasicDecoder(decoder_cell, helper, encoder_state, output_layer=output_layer)
+            output, _, _ = seq2seq.dynamic_decode(decoder, maximum_iterations=self.max_sentence_length, impute_finished=True)
 
-        output_layer = tf.layers.Dense(self.num_words,
-                                       kernel_initializer=tf.truncated_normal_initializer(mean=0.0, stddev=0.1))
+        # with tf.variable_scope('train'):
+        #     # 定义training decoder
+        #     training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
+        #     training_decoder = seq2seq.BasicDecoder(decoder_cell, training_helper, encoder_state)
+        #     # impute_finish 标记为True时，序列读入<eos>后不再进行计算，保持state不变并且输出全0
+        #     training_output, _, _ = seq2seq.dynamic_decode(training_decoder,
+        #                                                    # 加上<GO>和<EOS>
+        #                                                    maximum_iterations=self.max_sentence_length,
+        #                                                    impute_finished=True)
+        # with tf.variable_scope('predict', reuse=True):
+        #     # predict decoder
+        #     predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.word2index['GO']),
+        #                                                    self.word2index['EOS'])
+        #     predict_decoder = seq2seq.BasicDecoder(decoder_cell, predict_helper, encoder_state)
+        #     predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder,
+        #                                                   maximum_iterations=self.max_sentence_length,
+        #                                                   impute_finished=True)
 
-        with tf.variable_scope('train'):
-            # 定义training decoder
-            training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
-            training_decoder = seq2seq.BasicDecoder(decoder_cell, training_helper, encoder_state, output_layer)
-            # impute_finish 标记为True时，序列读入<eos>后不再进行计算，保持state不变并且输出全0
-            training_output, _, _ = seq2seq.dynamic_decode(training_decoder,
-                                                           # 加上<GO>和<EOS>
-                                                           maximum_iterations=self.max_sentence_length + 2,
-                                                           impute_finished=True)
-        with tf.variable_scope('predict', reuse=True):
-            # predict decoder
-            predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.word2index['GO']),
-                                                           self.word2index['EOS'])
-            predict_decoder = seq2seq.BasicDecoder(decoder_cell, predict_helper, encoder_state, output_layer)
-            predict_output, _, _ = seq2seq.dynamic_decode(predict_decoder,
-                                                          maximum_iterations=self.max_sentence_length + 2,
-                                                          impute_finished=True)
-
-        return training_output, predict_output
+        # return training_output, predict_output
+        return output
 
     def _model(self, embed):
         graph = tf.Graph()
@@ -162,22 +167,28 @@ class seq2seqModel(object):
 
             encoder_output, encoder_state = self._encoder(keep_prob, x_embedding, x_sequence_length, batch_size)
 
-            train_output, predict_output = self._decoder(keep_prob, encoder_output, encoder_state, x_sequence_length,
-                                                         batch_size, y_embedding, y_sequence_length, embedding)
+            training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
+            predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.word2index['GO']),
+                                                           self.word2index['EOS'])
+            train_output = self._decoder(keep_prob, encoder_output, encoder_state, batch_size, 'decode', training_helper)
+            predict_output = self._decoder(keep_prob, encoder_output, encoder_state, batch_size, 'decode', predict_helper, True)
 
             # loss function
             training_logits = tf.identity(train_output.rnn_output, name='training_logits')
             predicting_logits = tf.identity(predict_output.rnn_output, name='predicting')
 
+            # target = tf.slice(y_input, [0, 1], [-1, -1])
+            # target = tf.concat([tf.fill([batch_size, 1], self.word2index['GO']), y_input], 1)
+            target = y_input
+
             masks = tf.sequence_mask(y_sequence_length, dtype=tf.float32, name='mask')
 
-            with tf.variable_scope('optimization'):
-                loss = seq2seq.sequence_loss(training_logits, y_input, masks)
-                optimizer = tf.train.AdamOptimizer(lr)
-                gradients = optimizer.compute_gradients(loss)
-                capped_gradients = [(tf.clip_by_value(grad, -5., 5.), var) for grad, var in gradients if
-                                    grad is not None]
-                train_op = optimizer.apply_gradients(capped_gradients)
+            loss = seq2seq.sequence_loss(training_logits, target, masks)
+            optimizer = tf.train.AdamOptimizer(lr)
+            gradients = optimizer.compute_gradients(loss)
+            capped_gradients = [(tf.clip_by_value(grad, -5., 5.), var) for grad, var in gradients if
+                                grad is not None]
+            train_op = optimizer.apply_gradients(capped_gradients)
 
         return graph, loss, train_op, predicting_logits
 
@@ -212,7 +223,7 @@ class seq2seqModel(object):
                 aver_loss += loss
         return aver_loss / batch_num
 
-    def train(self, batch_size=64, _lr=0.002, max_epoch=1):
+    def train(self, batch_size=64, _lr=0.0003, max_epoch=1):
         train_data, valid_data, test_data = self._read_data_db()
         self.test_data(valid_data)
 
@@ -222,6 +233,7 @@ class seq2seqModel(object):
         with self.sess.as_default():
             for epoch in range(max_epoch):
                 for i in range(tr_batch_num):
+                    _lr = _lr / (epoch + 1)
                     x, y = train_data.next_batch(batch_size)
                     assert len(x) == len(y)
                     batch_x, length_x, batch_y, length_y = self._preprocess_data(x, y)
@@ -232,7 +244,7 @@ class seq2seqModel(object):
                                  g.get_tensor_by_name('y_length:0'): length_y,
                                  g.get_tensor_by_name('learning_rate:0'): _lr,
                                  g.get_tensor_by_name('batch_size:0'): len(length_x),
-                                 g.get_tensor_by_name('keep_prob:0'): 0.9
+                                 g.get_tensor_by_name('keep_prob:0'): 0.8
                                  }
                     try:
                         loss_var, *_ = self.sess.run([self.loss, self.train_op], feed_dict)
@@ -279,9 +291,11 @@ if __name__ == '__main__':
     a = seq2seqModel()
     while True:
         try:
-            a.train()
+            a.train(max_epoch=10)
         except tf.errors.ResourceExhaustedError:
             pass
+        except Exception as e:
+            print(e)
     # a.test('战狼56亿票房，旷世神作，中国第一')
     # a.test('人们提起网文都会说，第一部网络小说是痞子蔡的《第一次的亲密接触》。')
     # a.test('最后怎么解决的？')

@@ -1,4 +1,5 @@
 import io
+import numpy as np
 
 
 def load_vectors(fname):
@@ -27,13 +28,14 @@ if __name__ == '__main__':
     print('open dict')
     veck = set(vec.keys())
     res = dic & veck  # 交集
+    randvec = np.random.randn(4, d)
+    np.set_printoptions(precision=3, suppress=True, linewidth=10000)
     print('write')
-    special_embedding = '0 ' * d
     with open('word_embed_clean.vec', 'w', encoding='utf-8') as f:
         f.write('{} {}\n'.format(len(res) + 4, d))
-        f.write('UNK {}\n'.format(special_embedding))
-        f.write('GO {}\n'.format(special_embedding))
-        f.write('PAD {}\n'.format(special_embedding))
-        f.write('EOS {}\n'.format(special_embedding))
+        f.write('UNK {}\n'.format(str(randvec[0])[1: -2]))
+        f.write('GO {}\n'.format(str(randvec[1])[1: -2]))
+        f.write('PAD {}\n'.format(str(randvec[2])[1: -2]))
+        f.write('EOS {}\n'.format(str(randvec[3])[1: -2]))
         for k in res:
             f.write(k + ' ' + vec[k])

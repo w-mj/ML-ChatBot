@@ -31,7 +31,7 @@ class DataBatch_db(object):
             query = tuple(self._ids[index: index + batch_size])
             self._index += batch_size
         else:
-            query = tuple(self._ids[index:] + self._ids[0: index + batch_size - size])
+            query = tuple(np.concatenate((self._ids[index:], self._ids[0: index + batch_size - size])))
             self._index = index + batch_size - size
             if self._shuffle:
                 index = np.random.permutation(self._size)
