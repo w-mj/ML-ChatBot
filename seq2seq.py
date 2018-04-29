@@ -111,23 +111,18 @@ class seq2seqModel(object):
 
     def _encoder(self, keep_prob, x_embedding, x_sequence_length, batch_size):
         cell_f = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(self.lstm_dims)])
-        # cell_b = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(self.lstm_dims)])
+        cell_b = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(self.lstm_dims)])
         # 计算encoder
-        # ((fw_outputs,
-        #   bw_outputs),
-        #  (fw_state,
-        #   bw_state)) = tf.nn.bidirectional_dynamic_rnn(cell_bw=cell_b, cell_fw=cell_f, inputs=x_embedding,
-        #                                                initial_state_bw=cell_b.zero_state(batch_size, tf.float32),
-        #                                                initial_state_fw=cell_f.zero_state(batch_size, tf.float32),
-        #                                                sequence_length=x_sequence_length)
-        # encoder_outputs = tf.concat((fw_outputs, bw_outputs), 2)
-        # encoder_state = tf.concat((fw_state, bw_state), 1, name='bidirectional_concat')
-        # return encoder_outputs, encoder_state
-        # TODO: bi
-        output, state = tf.nn.dynamic_rnn(cell=cell_f, inputs=x_embedding,
-                                          initial_state=cell_f.zero_state(batch_size, tf.float32),
-                                        sequence_length=x_sequence_length)
-        return output, state
+        output, states = tf.nn.bidirectional_dynamic_rnn(cell_bw=cell_b, cell_fw=cell_f, inputs=x_embedding,
+                                                         initial_state_bw=cell_b.zero_state(batch_size, tf.float32),
+                                                         initial_state_fw=cell_f.zero_state(batch_size, tf.float32),
+                                                         sequence_length=x_sequence_length)
+        encoder_outputs = tf.concat(output, 2)
+        return encoder_outputs, states
+        # output, states = tf.nn.dynamic_rnn(cell=cell_f, inputs=x_embedding,
+        #                                   initial_state=cell_f.zero_state(batch_size, tf.float32),
+        #                                   sequence_length=x_sequence_length)
+        # return output, states
 
     def _decoder(self, keep_prob, encoder_output, encoder_state, batch_size, scope, helper, reuse=None):
         with tf.variable_scope(scope, reuse=reuse):
@@ -135,8 +130,8 @@ class seq2seqModel(object):
             cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(self.lstm_dims)])
             attention_mechanism = seq2seq.BahdanauAttention(self.hidden_size, attention_states)  # attention
             decoder_cell = seq2seq.AttentionWrapper(cell, attention_mechanism,
-                                                    attention_layer_size=self.hidden_size)
-            decoder_initial_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
+                                                    attention_layer_size=self.hidden_size // 2)
+            decoder_initial_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state[0])
             decoder_cell = rnn.OutputProjectionWrapper(decoder_cell, self.hidden_size, reuse=reuse,
                                                        activation=tf.nn.leaky_relu)
             output_layer = tf.layers.Dense(self.num_words,
@@ -216,10 +211,13 @@ class seq2seqModel(object):
                     output = np.argmax(output[0], 1)  # 按行取最大值
                     output = objector(output)
                     target = objector(batch_y[0])
+                    target_in = objector(batch_x[0])
                     predict_output = np.argmax(predict_output[0], 1)  # 按行取最大值
                     predict_output = objector(predict_output)
-                    print('input: {0}\ntarget-output: {1}\ntrain-output: {2}\npredict-output: {3}'.
-                          format(x[0], ' '.join(target), ' '.join(output), ' '.join(predict_output)))
+                    print(
+                        'input: {}\noutput: {}\ntarget-input: {}\ntarget-output: {}\ntrain-output: {}\npredict-output: {}'.
+                        format(x[0], y[0], ' '.join(target_in), ' '.join(target), ' '.join(output),
+                               ' '.join(predict_output)))
                     printed = True
 
                 aver_loss += loss
@@ -267,6 +265,7 @@ class seq2seqModel(object):
         with self.graph.as_default():
             saver = tf.train.Saver()
             saver.save(self.sess, './model_save/seq2seq')
+            print('saved')
 
     def test(self, sentence):
         question = jieba.cut(sentence)  # 分词
@@ -291,13 +290,13 @@ class seq2seqModel(object):
 
 if __name__ == '__main__':
     a = seq2seqModel()
-    i = 6
+    i = 5
     while True:
         # try:
-        a.train(batch_size=64, learning_rate=1 / (10 ** i), max_epoch=10)
+        a.train(batch_size=64, learning_rate=1 / (10 ** i), max_epoch=1)
         # except Exception as e:
         #     print(e)
-        i += 1
+        i += 10
     # a.test('战狼56亿票房，旷世神作，中国第一')
     # a.test('人们提起网文都会说，第一部网络小说是痞子蔡的《第一次的亲密接触》。')
     # a.test('最后怎么解决的？')
