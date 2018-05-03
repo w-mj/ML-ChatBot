@@ -13,13 +13,14 @@ from DataBatch_db import DataBatch_db
 class seq2seqModel(object):
     def __init__(self):
         self.embedding_size = 300
-        self.num_words = 85000
+        self.num_words = 85000  # 从文件读
         self.sentence_length = 32
         self.max_sentence_length = 50
         self.hidden_size = 128
         self.lstm_dims = 10
         self.word2index, self.index2word, embed, self.num_words, self.embedding_size = self._read_embedding()
         self.graph, self.loss, self.train_op, self.predict_output = self._model(embed)
+        del embed
         self.sess = tf.Session(graph=self.graph)
         self.separator = None
         self.db = None
@@ -83,9 +84,9 @@ class seq2seqModel(object):
                DataBatch_db(db, ids[int(size * 0.8):])
 
     def _preprocess_data(self, batch_x, batch_y):
-        batch_x = map(lambda x: x[::-1], batch_x)
-        batch_x = map(str.split, batch_x)  # 把空格分隔的词转换成列表
+        batch_x = list(map(str.split, batch_x))  # 把空格分隔的词转换成列表
         batch_y = map(str.split, batch_y)
+        list(map(lambda x: x.reverse(), batch_x))
         # [x.reverse() for x in batch_x]
         max_length = self.max_sentence_length
         batch_x = map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_x)
@@ -188,7 +189,7 @@ class seq2seqModel(object):
         return graph, loss, train_op, predicting_logits
 
     def test_data(self, data):
-        batch_size = 64
+        batch_size = 16
         batch_num = 10
         g = self.graph
         aver_loss = 0
@@ -290,13 +291,13 @@ class seq2seqModel(object):
 
 if __name__ == '__main__':
     a = seq2seqModel()
-    i = 5
+    i = 7
     while True:
         # try:
-        a.train(batch_size=64, learning_rate=1 / (10 ** i), max_epoch=1)
+        a.train(batch_size=32, learning_rate=1 / (10 ** i), max_epoch=1)
         # except Exception as e:
         #     print(e)
-        i += 10
+        i += 1
     # a.test('战狼56亿票房，旷世神作，中国第一')
     # a.test('人们提起网文都会说，第一部网络小说是痞子蔡的《第一次的亲密接触》。')
     # a.test('最后怎么解决的？')
