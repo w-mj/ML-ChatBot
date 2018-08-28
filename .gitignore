@@ -15,3 +15,6 @@ word_embed_clean.vec
 wiki.zh.vec
 usually_word
 summary
+*.sqlite
+*.npy
+words.txt

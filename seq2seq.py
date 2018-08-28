@@ -3,28 +3,25 @@ import tensorflow.contrib.rnn as rnn
 import numpy as np
 import jieba
 import tensorflow.contrib.seq2seq as seq2seq
-from utils import variable_summaries
 import read_data
+import time
+import vocabulary
 
 
 class seq2seqModel(object):
     def __init__(self):
-        self.embedding_size = 300
-        self.num_words = 85000  # 从文件读
-        self.sentence_length = 32
-        self.max_sentence_length = 50
-        self.hidden_size = 128
-        self.lstm_dims = 10
-        self.word2index, self.index2word, embed, self.num_words, self.embedding_size = read_data.read_embedding()
-        self.graph, self.loss, self.train_op, self.predict_output = self._model(embed)
-        del embed
+        self.max_sentence_length = 35
+        self.rnn_hidden_size = 128
+        self.lstm_dims = 4
+        self.voca = vocabulary.Vocabulary()
+        self.embed_np = read_data.read_embedding()
+        self.graph, self.loss, self.train_op, self.predict_output = self._model()
 
-        summary_dir = 'summary'
-
-        self.sess = tf.Session(graph=self.graph)
-
-        self.writer = tf.summary.FileWriter(summary_dir, self.sess.graph)
-
+        # summary_dir = 'summary'
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        self.sess = tf.Session(graph=self.graph, config=config)
+        # self.writer = tf.summary.FileWriter(summary_dir, self.sess.graph)
         with self.graph.as_default():
             self.sess.run(tf.global_variables_initializer())
             try:
@@ -32,70 +29,62 @@ class seq2seqModel(object):
                 saver.restore(self.sess, './model_save/seq2seq')
                 print('load model.')
             except Exception:
-                print('fail to read model.')
+                print('fail to load model.')
 
     def _preprocess_data(self, batch_x, batch_y):
-        batch_x = list(map(str.split, batch_x))  # 把空格分隔的词转换成列表
-        batch_y = map(str.split, batch_y)
-        list(map(lambda x: x.reverse(), batch_x))
+        # list(map(lambda x: x.reverse(), batch_x))
         # [x.reverse() for x in batch_x]
         max_length = self.max_sentence_length
-        batch_x = map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_x)
-        batch_y = map(lambda x: x[0: max_length] if len(x) > max_length else x, batch_y)
+        batch_x = [x if len(x) < max_length - 1 else x[:max_length - 1] for x in batch_x]
+        batch_y = [x if len(x) < max_length - 1 else x[:max_length - 1] for x in batch_y]
+        batch_x = [self.voca.prepare_text(x) for x in batch_x]
+        batch_y = [self.voca.prepare_text(x) for x in batch_y]
         # batch_x = list(map(lambda x: ['GO'] + x + ['EOS'], batch_x))  # 在每句话前后添加开始和结束符
-        batch_x = list(map(lambda x: x + ['EOS'], batch_x))
-        batch_y = list(map(lambda x: x + ['EOS'], batch_y))
-        length_x = list(map(len, batch_x))  # 获得每句话的长度
-        length_y = list(map(len, batch_y))
+        length_x = [len(x) for x in batch_x]  # 获得每句话的长度
+        length_y = [len(x) for x in batch_y]
         max_lx = max(length_x)  # 最大长度
         max_ly = max(length_y)
-        batch_x = list(map(lambda x: x + (['PAD'] * (max_lx - len(x))), batch_x))  # 小于最大长度的句子用PAD补足
-        batch_y = list(map(lambda x: x + (['PAD'] * (max_ly - len(x))), batch_y))
-        batch_x = np.array(batch_x)  # 转numpy数组
-        batch_y = np.array(batch_y)
-        batch_x = np.vectorize(lambda x: self.word2index.get(x, self.word2index['UNK']))(batch_x)  # 字符映射index
-        batch_y = np.vectorize(lambda x: self.word2index.get(x, self.word2index['UNK']))(batch_y)
+        batch_x = [x + ([self.voca.PAD] * (max_lx - len(x))) for x in batch_x]  # 小于最大长度的句子用PAD补足
+        batch_y = [x + ([self.voca.PAD] * (max_ly - len(x))) for x in batch_y]
+
+        assert 0 not in length_x
+        assert 0 not in length_y
+
         return batch_x, length_x, batch_y, length_y
 
     def _cell(self, keep_prob):
-        cell = rnn.LSTMCell(num_units=self.hidden_size)
+        cell = rnn.LSTMCell(num_units=self.rnn_hidden_size)
         return rnn.DropoutWrapper(cell, output_keep_prob=keep_prob)
 
     def _encoder(self, keep_prob, x_embedding, x_sequence_length, batch_size):
-        num_layers = self.lstm_dims // 2
-        cell_f = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(num_layers)])
-        cell_b = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(num_layers)])
+        num_layers = self.lstm_dims
+        cell_f = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(num_layers // 2)])
+        cell_b = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(num_layers // 2)])
         # 计算encoder
         output, states = tf.nn.bidirectional_dynamic_rnn(cell_bw=cell_b, cell_fw=cell_f, inputs=x_embedding,
                                                          initial_state_bw=cell_b.zero_state(batch_size, tf.float32),
                                                          initial_state_fw=cell_f.zero_state(batch_size, tf.float32),
                                                          sequence_length=x_sequence_length)
         encoder_outputs = tf.concat(output, 2)
-
         encoder_state = []
-        for layer_id in range(num_layers):
+        for layer_id in range(num_layers // 2):
             encoder_state.append(states[0][layer_id])  # forward
             encoder_state.append(states[1][layer_id])  # backward
         encoder_state = tuple(encoder_state)
-
         return encoder_outputs, encoder_state
-        # output, states = tf.nn.dynamic_rnn(cell=cell_f, inputs=x_embedding,
-        #                                   initial_state=cell_f.zero_state(batch_size, tf.float32),
-        #                                   sequence_length=x_sequence_length)
-        # return output, states
 
     def _decoder(self, keep_prob, encoder_output, encoder_state, batch_size, scope, helper, reuse=None):
         with tf.variable_scope(scope, reuse=reuse):
             attention_states = encoder_output
             cell = rnn.MultiRNNCell([self._cell(keep_prob) for _ in range(self.lstm_dims)])
-            attention_mechanism = seq2seq.BahdanauAttention(self.hidden_size, attention_states)  # attention
+            attention_mechanism = seq2seq.BahdanauAttention(self.rnn_hidden_size, attention_states)  # attention
             decoder_cell = seq2seq.AttentionWrapper(cell, attention_mechanism,
-                                                    attention_layer_size=self.hidden_size // 2)
-            decoder_cell = rnn.OutputProjectionWrapper(decoder_cell, self.hidden_size, reuse=reuse,
+                                                    attention_layer_size=self.rnn_hidden_size // 2)
+            decoder_cell = rnn.OutputProjectionWrapper(decoder_cell, self.rnn_hidden_size, reuse=reuse,
                                                        activation=tf.nn.leaky_relu)
             decoder_initial_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
 
-            output_layer = tf.layers.Dense(self.num_words,
+            output_layer = tf.layers.Dense(self.voca.word_num,
                                            kernel_initializer=tf.contrib.layers.xavier_initializer(),
                                            activation=tf.nn.leaky_relu)
             decoder = seq2seq.BasicDecoder(decoder_cell, helper, decoder_initial_state, output_layer=output_layer)
@@ -105,10 +94,11 @@ class seq2seqModel(object):
             # tf.summary.histogram('decoder', output)
         return output
 
-    def _model(self, embed):
+    def _model(self):
         graph = tf.Graph()
         with graph.as_default():
-            embedding = tf.Variable(embed, trainable=False, name='embedding')  # 词向量
+            embedding = tf.get_variable('embedding', initializer=self.embed_np)
+            # embedding = tf.Variable(embed, trainable=True, name='embedding')  # 词向量
             lr = tf.placeholder(tf.float32, [], name='learning_rate')
             # 输入数据
             x_input = tf.placeholder(tf.int32, [None, None], name='x_input')  # 输入数据X
@@ -116,15 +106,20 @@ class seq2seqModel(object):
             x_embedding = tf.nn.embedding_lookup(embedding, x_input)  # 将输入的one-hot编码转换成向量
             y_input = tf.placeholder(tf.int32, [None, None], name='y_input')  # 输入数据Y
             y_sequence_length = tf.placeholder(tf.int32, [None], name='y_length')  # 每一个Y的长度
-            y_embedding = tf.nn.embedding_lookup(embedding, y_input)  # 对Y向量化
             batch_size = tf.placeholder(tf.int32, [], name='batch_size')
             keep_prob = tf.placeholder(tf.float32, [], name='keep_prob')
 
             encoder_output, encoder_state = self._encoder(keep_prob, x_embedding, x_sequence_length, batch_size)
 
+            left_side = tf.fill([batch_size, 1], self.voca.SOS)
+            right_side = tf.strided_slice(y_input, [0, 0], [batch_size, -1], [1, 1])
+            preprocessed_targets = tf.concat([left_side, right_side], 1)
+            y_embedding = tf.nn.embedding_lookup(embedding, preprocessed_targets)  # 对Y向量化
+
             training_helper = seq2seq.TrainingHelper(inputs=y_embedding, sequence_length=y_sequence_length)
-            predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.word2index['GO']),
-                                                           self.word2index['EOS'])
+            predict_helper = seq2seq.GreedyEmbeddingHelper(embedding, tf.fill([batch_size], self.voca.SOS),
+                                                           self.voca.EOS)
+
             train_output = self._decoder(keep_prob, encoder_output, encoder_state, batch_size, 'decode',
                                          training_helper)
             predict_output = self._decoder(keep_prob, encoder_output, encoder_state, batch_size, 'decode',
@@ -132,19 +127,17 @@ class seq2seqModel(object):
 
             # loss function
             training_logits = tf.identity(train_output.rnn_output, name='training_logits')
-            predicting_logits = tf.identity(predict_output.rnn_output, name='predicting')
+            predicting_logits = tf.identity(predict_output.sample_id, name='predicted_id')
 
             # target = tf.slice(y_input, [0, 1], [-1, -1])
             # target = tf.concat([tf.fill([batch_size, 1], self.word2index['GO']), y_input], 1)
-            target = y_input
 
             masks = tf.sequence_mask(y_sequence_length, dtype=tf.float32, name='mask')
 
-            loss = seq2seq.sequence_loss(training_logits, target, masks)
+            loss = seq2seq.sequence_loss(training_logits, y_input, masks)
             optimizer = tf.train.AdamOptimizer(lr)
             gradients = optimizer.compute_gradients(loss)
-            capped_gradients = [(tf.clip_by_value(grad, -5., 5.), var) for grad, var in gradients if
-                                grad is not None]
+            capped_gradients = [(tf.clip_by_value(grad, -5., 5.), var) for grad, var in gradients if grad is not None]
             train_op = optimizer.apply_gradients(capped_gradients)
             # predicting_logits = tf.nn.softmax(predicting_logits, axis=1)
             tf.summary.scalar('loss', loss)
@@ -154,7 +147,7 @@ class seq2seqModel(object):
         return graph, loss, train_op, predicting_logits
 
     def test_data(self, data):
-        batch_size = 16
+        batch_size = 32
         batch_num = 10
         g = self.graph
         aver_loss = 0
@@ -175,15 +168,15 @@ class seq2seqModel(object):
                     feed_dict)
                 # self.writer.add_summary(merged, i)
                 if not printed:
-                    objector = np.vectorize(lambda s: self.index2word[s])
+                    objector = np.vectorize(lambda s: self.voca.index2word(s))
                     output = np.argmax(output[0], 1)  # 按行取最大值
                     output = objector(output)
                     target = objector(batch_y[0])
                     target_in = objector(batch_x[0])
-                    predict_output = np.argmax(predict_output[0], 1)  # 按行取最大值
-                    predict_output = objector(predict_output)
+                    # predict_output = np.argmax(predict_output[0], 1)  # 按行取最大值
+                    predict_output = objector(predict_output[0])
                     print(
-                        'input: {}\noutput\: {}\ntarget-input: {}\ntarget-output: {}\ntrain-output: {}\npredict-output: {}'.
+                        'input: {}\noutput: {}\ntarget-input: {}\ntarget-output: {}\ntrain-output: {}\npredict-output: {}'.
                             format(x[0], y[0], ' '.join(target_in), ' '.join(target), ' '.join(output),
                                    ' '.join(predict_output)))
                     printed = True
@@ -192,20 +185,21 @@ class seq2seqModel(object):
         return aver_loss / batch_num
 
     def train(self, batch_size, learning_rate, max_epoch=1):
+        learning_rate_set = [0, 1e-10, 1e-9, 1e-9, 1e-9, 1e-8, 1e-7, 1e-5, 1e-4, 1e-3, 1e-3, 1e-3, 1e-2]
         train_data, valid_data, test_data = read_data.read_data_db()
         self.test_data(valid_data)
         _lr = learning_rate
         g = self.graph
         tr_batch_num = train_data.size // batch_size
-        print("start training, max epoch: {0}, max batch: {1}".format(max_epoch, tr_batch_num))
+        print("start training, batch size {}, max epoch: {}, max batch: {}".format(batch_size, max_epoch, tr_batch_num))
+        loss_sum = 0
+        start_time = time.time()
         with self.sess.as_default():
-            merged = tf.summary.merge_all()
             for epoch in range(max_epoch):
-                _lr = _lr / (10 ** epoch)
                 for i in range(tr_batch_num):
                     x, y = train_data.next_batch(batch_size)
-                    assert len(x) == len(y)
                     batch_x, length_x, batch_y, length_y = self._preprocess_data(x, y)
+                    assert len(batch_x) == len(batch_y) == len(length_x) == len(length_y)
 
                     feed_dict = {g.get_tensor_by_name('x_input:0'): batch_x,
                                  g.get_tensor_by_name('x_length:0'): length_x,
@@ -215,19 +209,25 @@ class seq2seqModel(object):
                                  g.get_tensor_by_name('batch_size:0'): len(length_x),
                                  g.get_tensor_by_name('keep_prob:0'): 0.8
                                  }
-                    try:
-                         loss_var, *_ = self.sess.run([ self.loss, self.train_op], feed_dict)
-                        # self.writer.add_summary(me)
-                    except tf.errors.InvalidArgumentError as e:
-                        print(e)
-                    if (i + 1) % 10 == 0:
-                        print("training epoch {0}/{1}, learning rate = {2}, batch {3}/{4}, loss={5}"
-                              .format(epoch + 1, max_epoch, _lr, i + 1, tr_batch_num, loss_var))
 
+                    loss_var, *_ = self.sess.run([self.loss, self.train_op], feed_dict)
+                    # self.writer.add_summary(me)
+                    loss_sum += loss_var
                     if (i + 1) % 100 == 0:
+                        during_time = time.time() - start_time
+                        start_time = time.time()
+                        print("training epoch {}/{}, learning rate = {}, batch {}/{}, loss={:.6f}, during {:.1f} sec"
+                              .format(epoch + 1, max_epoch, _lr, i + 1, tr_batch_num, loss_sum / 100, during_time))
+                        loss_sum = 0
+                        with open('learning_rate', encoding='utf-8') as f:
+                            _lr = float(f.read())
+                        # _lr = learning_rate_set[int(loss_var)]
+
+                    if (i + 1) % 1000 == 0:
                         loss_var = self.test_data(valid_data)
                         print("valid result: loss={0}".format(loss_var))
                         self.save_model()
+                        start_time = time.time()
             loss_var = self.test_data(test_data)
             print('train finished, test tesult: loss={0}'.format(loss_var))
 
@@ -240,9 +240,9 @@ class seq2seqModel(object):
     def test(self, sentence):
         question = jieba.cut(sentence)  # 分词
         print(question)
-        question = [['GO'] + question + ['EOS']]
+        question = [question + ['EOS']]
         question = np.array(question)
-        question = np.vectorize(lambda x: self.word2index.get(x, self.word2index['UNK']))(question)
+        question = np.vectorize(lambda x: self.voca.word2index(x))(question)
         print(question)
         with self.sess.as_default():
             g = self.graph
@@ -254,23 +254,13 @@ class seq2seqModel(object):
         answer = answer[0]  # 去掉batch层
         print(answer[:10, :10])
         answer = np.argmax(answer, 1)  # 按行取最大值
-        answer = np.vectorize(lambda x: self.index2word[x])(answer)
+        answer = np.vectorize(lambda x: self.voca.index2word(x))(answer)
         print(answer)
 
 
 if __name__ == '__main__':
     a = seq2seqModel()
-    i = 8
-    while True:
-        # try:
-        a.train(batch_size=32, learning_rate=1 / (10 ** i), max_epoch=1)
-        # except Exception as e:
-        #     print(e)
-        i += 1
-    # a.test('战狼56亿票房，旷世神作，中国第一')
-    # a.test('人们提起网文都会说，第一部网络小说是痞子蔡的《第一次的亲密接触》。')
-    # a.test('最后怎么解决的？')
-    # a.train()
-    a.save_model()
+    i = 3
+    a.train(batch_size=64, learning_rate=0.0005, max_epoch=1)
 
 # reference https://github.com/AbrahamSanders/seq2seq-chatbot/

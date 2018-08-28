@@ -7,18 +7,7 @@ import numpy as np
 
 
 def read_embedding():
-    fin = io.open('word_embed_clean.vec', 'r', encoding='utf-8', newline='\n', errors='ignore')
-    n, d = map(int, fin.readline().split())
-    data = []
-    word2index = {}
-    index2word = {}
-    for i, line in enumerate(fin):
-        tokens = line.strip().split()
-        data.append(list(map(float, tokens[1:])))
-        assert len(data[-1]) == d
-        word2index[tokens[0]] = i
-        index2word[i] = tokens[0]
-    return word2index, index2word, np.asarray(data, dtype=np.float32), n, d
+    return np.load('embedding_matrix.npy')
 
 
 def read_dict():
@@ -47,10 +36,10 @@ def read_data_pylist():
 
 
 def read_data_db():
-    db = sqlite3.connect('data_separated.db')
+    db = sqlite3.connect('new_data.sqlite')
     size = db.execute('SELECT count (*) AS num FROM conversation').fetchall()[0][0]
     print('open database, {} items altogether'.format(size))
     ids = np.random.permutation(size)
-    return DataBatch_db(db, ids[0: int(size * 0.6)]), \
-           DataBatch_db(db, ids[int(size * 0.6): int(size * 0.8)]), \
-           DataBatch_db(db, ids[int(size * 0.8):])
+    return DataBatch_db(db, ids[0: int(size * 0.98)]), \
+           DataBatch_db(db, ids[int(size * 0.98): int(size * 0.99)]), \
+           DataBatch_db(db, ids[int(size * 0.99):])

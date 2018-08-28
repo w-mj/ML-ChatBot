@@ -15,7 +15,7 @@ class DataBatch_db(object):
             self._ids = id_list
         else:
             self._size = self._cursor.execute('select count(*) as num from conversation')[0][0]
-            self._ids = range(self._size)
+            self._ids = range(1, self._size + 1)
 
         self._ids = np.asarray(self._ids)
         if shuffle:
